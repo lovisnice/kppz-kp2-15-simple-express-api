@@ -1,86 +1,105 @@
 // src/routes/auth.js
-const express = require("express");
-const userModel = require("../data/users");
-
+const express = require('express');
 const router = express.Router();
 
-// middleware: Bearer token
-function authenticateToken(req, res, next) {
-  const auth = req.headers["authorization"] || "";
-  const [type, token] = auth.split(" ");
+const userModel = require('../data/users');
 
-  if (type !== "Bearer" || !token) {
-    return res.status(401).json({ error: "Missing Bearer token" });
+const {
+  validateRequest,
+  registerValidation,
+  sanitizeInput,
+  preventNoSQLInjection,
+} = require('../middleware/validationMiddleware');
+
+// Проста генерація фейкового JWT (як у твоєму КП 2-13)
+const generateToken = (userId) => `fake-jwt-token-${userId}-${Date.now()}`;
+
+// Middleware: перевірка Bearer
+const requireAuth = (req, res, next) => {
+  const auth = req.headers.authorization || '';
+  if (!auth.toLowerCase().startsWith('bearer ')) {
+    return res.status(401).json({ error: 'Missing Bearer token' });
   }
-
-  const user = userModel.verifyToken(token);
-  if (!user) {
-    return res.status(401).json({ error: "Invalid token" });
-  }
-
-  req.user = userModel.sanitizeUser(user);
+  const token = auth.slice(7).trim();
+  const user = userModel.findByToken(token);
+  if (!user) return res.status(401).json({ error: 'Invalid token' });
+  req.user = user;
   next();
-}
-
-function requireAdmin(req, res, next) {
-  if (!req.user || req.user.role !== "admin") {
-    return res.status(403).json({ error: "Admin only" });
-  }
-  next();
-}
-
-// POST /api/auth/register
-router.post("/register", (req, res) => {
-  const { username, email, password } = req.body || {};
-
-  if (!username || !email || !password) {
-    return res.status(400).json({ error: "username, email, password are required" });
-  }
-
-  if (userModel.findByEmail(email)) {
-    return res.status(409).json({ error: "Email already exists" });
-  }
-
-  const user = userModel.create({ username, email, password });
-  const token = userModel.generateToken(user.id);
-  userModel.saveToken(user.id, token);
-
-  return res.status(201).json({
-    user: userModel.sanitizeUser(user),
-    token,
-  });
-});
-
-// POST /api/auth/login
-router.post("/login", (req, res) => {
-  const { email, password } = req.body || {};
-
-  if (!email || !password) {
-    return res.status(400).json({ error: "email and password are required" });
-  }
-
-  const user = userModel.findByEmail(email);
-  if (!user || !userModel.checkPassword(user, password)) {
-    return res.status(401).json({ error: "Invalid credentials" });
-  }
-
-  const token = userModel.generateToken(user.id);
-  userModel.saveToken(user.id, token);
-
-  return res.json({ token });
-});
-
-// GET /api/auth/profile (protected)
-router.get("/profile", authenticateToken, (req, res) => {
-  return res.json({ user: req.user });
-});
-
-// GET /api/auth/users (admin only)
-router.get("/users", authenticateToken, requireAdmin, (req, res) => {
-  return res.json({ users: userModel.getAll() });
-});
-
-module.exports = {
-  router,
-  authenticateToken, // експортуємо для products routes
 };
+
+// Middleware: admin only
+const requireAdmin = (req, res, next) => {
+  if (!req.user || req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  next();
+};
+
+// REGISTER (як у методичці: sanitize + nosql + validateRequest)
+router.post(
+  '/register',
+  sanitizeInput,
+  preventNoSQLInjection,
+  validateRequest(registerValidation),
+  (req, res) => {
+    try {
+      const { username, email, password } = req.body;
+
+      const existingUser = userModel.findByEmail(email);
+      if (existingUser) {
+        return res.status(409).json({
+          success: false,
+          message: 'Користувач з таким email вже існує',
+        });
+      }
+
+      const existingUsername = userModel.getAll().find((u) => u.username === username);
+      if (existingUsername) {
+        return res.status(409).json({
+          success: false,
+          message: 'Користувач з таким іменем вже існує',
+        });
+      }
+
+      const newUser = userModel.create({ username, email, password });
+
+      const token = generateToken(newUser.id);
+      userModel.saveToken(newUser.id, token);
+
+      res.status(201).json({
+        success: true,
+        message: 'Користувач успішно зареєстрований',
+        token,
+        user: newUser,
+      });
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        message: 'Помилка при реєстрації',
+        error: error.message,
+      });
+    }
+  }
+);
+
+// LOGIN (мінімальна санація + nosql)
+router.post('/login', sanitizeInput, preventNoSQLInjection, (req, res) => {
+  const { email, password } = req.body;
+  const user = userModel.findByEmail(email);
+  if (!user || user.password !== password) {
+    return res.status(401).json({ success: false, message: 'Невірні дані' });
+  }
+  const token = generateToken(user.id);
+  userModel.saveToken(user.id, token);
+  res.json({ success: true, token, user });
+});
+
+// PROFILE
+router.get('/profile', requireAuth, (req, res) => {
+  res.json({ success: true, user: req.user });
+});
+
+// USERS ADMIN
+router.get('/users', requireAuth, requireAdmin, (req, res) => {
+  res.json({ success: true, users: userModel.getAll() });
+});
+
+module.exports = router;
